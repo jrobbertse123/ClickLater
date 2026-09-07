@@ -33,9 +33,14 @@ $work = Join-Path $env:TEMP 'cl_build'
 $dist = Join-Path $env:TEMP 'cl_dist'
 Remove-Item $work, $dist -Recurse -Force -ErrorAction SilentlyContinue
 
+# SENIOR: --specpath matters. Without it PyInstaller drops a freshly generated
+#   ClickLater.spec in the repo root, overwriting the committed one AND baking
+#   this machine's absolute paths into it ('C:\Users\...\click_later.ico').
+#   CI builds from that spec on a clean Windows runner, so committing the
+#   regenerated file silently breaks the release workflow. Send it to temp.
 python -m PyInstaller --onefile --windowed --noconfirm --name ClickLater `
     --icon $ico --add-data "$ico;." --collect-all customtkinter `
-    --workpath $work --distpath $dist click_later.py
+    --workpath $work --distpath $dist --specpath $work click_later.py
 
 New-Item -ItemType Directory -Force -Path .\dist | Out-Null
 Copy-Item (Join-Path $dist 'ClickLater.exe') .\dist\ClickLater.exe -Force
