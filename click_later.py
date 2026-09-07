@@ -31,11 +31,15 @@ import customtkinter as ctk
 # the #1 scaling bug in any Windows automation tool.
 # ---------------------------------------------------------------------------
 def _enable_dpi_awareness():
-    try:
-        ctypes.windll.user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4))  # PER_MONITOR_V2
-        return
-    except Exception:
-        pass
+    # SENIOR: deliberately PER_MONITOR (v1), NOT per-monitor-v2. V2 asks Windows
+    # to rescale the non-client area (titlebar/borders) live during a monitor
+    # hop, which tkinter mishandles on a resizable(False, False) window - the
+    # frame gets recomputed against a stale client size and the window creeps.
+    # CustomTkinter's own ScalingTracker refuses V2 for exactly this reason, and
+    # since it calls SetProcessDpiAwareness(2) when the first window is built,
+    # asking for V2 here would only win the race and hand us the broken combo.
+    # V1 still reports true physical pixels, which is all the crosshair and
+    # SetCursorPos need.
     try:
         ctypes.windll.shcore.SetProcessDpiAwareness(2)
         return
@@ -199,7 +203,7 @@ class App(ctk.CTk):
         self._set_icon()
 
         self._build()
-        self._fit()   # SENIOR: size window to content -> never clips at any DPI
+        self._fit(center=True)   # size window to content -> never clips at any DPI
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
     # -- window chrome -----------------------------------------------------
@@ -218,19 +222,42 @@ class App(ctk.CTk):
         except Exception:
             pass
 
-    def _fit(self):
-        # SENIOR: hardcoding a height gets clipped at 125/150% scaling - exactly
-        # the bug we just hit. Instead we measure the content's *requested* size
-        # and size the window to it. Crucially we call the BASE Tk geometry, not
-        # CTk's override: winfo_reqwidth/height already report real device pixels,
-        # whereas CTk.geometry() would re-apply window scaling and double-count.
+    def _set_scaling(self, new_widget_scaling, new_window_scaling):
+        # SENIOR: this is the drag-shrink fix. When the window crosses onto a
+        # monitor with different scaling, CTk resizes it by multiplying its OWN
+        # cached _current_width by the new factor. That cache is never written
+        # by us - it is inferred from <Configure> - and both legs of the
+        # conversion truncate (int(), not round()), so each hop rounds DOWN and
+        # nothing ever rounds back up. Worse, CTk 5.2.2's guard against reading
+        # dimensions mid-rescale is a no-op (block_update_dimensions_event sets
+        # its flag False instead of True), so a <Configure> arriving inside the
+        # 100ms detection gap divides the NEW physical width by the OLD scale.
+        # Measured: 526px -> 435px over 12 crossings, monotonically down.
+        #
+        # So we let CTk rescale the widgets, then discard its window arithmetic
+        # and re-measure from the content. Absolute, not relative: nothing is
+        # carried forward, so nothing can accumulate.
+        super()._set_scaling(new_widget_scaling, new_window_scaling)
+        self.after_idle(self._fit)
+
+    def _fit(self, center: bool = False):
+        # SENIOR: hardcoding a size gets clipped at 125/150% scaling, so we
+        # measure the content instead. winfo_req* report PHYSICAL pixels, while
+        # CTk's geometry() thinks in logical units and re-applies the scale, so
+        # we divide first and let it multiply back - that way CTk's cache ends
+        # up holding a value we actually agree with, instead of one it guessed.
         self.update_idletasks()
-        w = self.winfo_reqwidth()
-        h = self.winfo_reqheight()
-        sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
-        x = max(0, (sw - w) // 2)
-        y = max(0, (sh - h) // 3)
-        tk.Tk.geometry(self, f"{w}x{h}+{x}+{y}")
+        scale = self._get_window_scaling()
+        ctk.CTk.geometry(self, f"{round(self.winfo_reqwidth() / scale)}"
+                               f"x{round(self.winfo_reqheight() / scale)}")
+
+        # SENIOR: only on first show - re-centring on every monitor hop would
+        # yank the window out from under the cursor mid-drag.
+        if center:
+            self.update_idletasks()
+            x = max(0, (self.winfo_screenwidth() - self.winfo_width()) // 2)
+            y = max(0, (self.winfo_screenheight() - self.winfo_height()) // 3)
+            tk.Tk.wm_geometry(self, f"+{x}+{y}")
 
     # -- helpers -----------------------------------------------------------
     def _card(self, title):
